@@ -29,9 +29,23 @@ metrics:
   - key: applications
     name: 投递数
     aliases: [投递数, 投递量, 投了多少, 投了几家, 一共投, 总共投, 投递, 投了, 数量, 几家]
-    expr: COUNT(DISTINCT a.id)
     unit: 家
-    note: 只数投出去的记录，不区分当前状态。
+    version: 2
+    expr: "COUNT(DISTINCT CASE WHEN a.status <> '已放弃' THEN a.id END)"
+    note: 排除本人已放弃的记录。v1 时期会计入全部入库记录。
+    # 口径改过就要留旧版本：报表上 8 月曾经是 128，改口径后是 114，
+    # 不留下 v1 就没法回答「按当时的口径应该是多少」。
+    history:
+      - version: 1
+        effective_from: "2026-07-01"
+        expr: "COUNT(DISTINCT a.id)"
+        note: 所有入库记录都算投过
+      - version: 2
+        effective_from: "2026-09-15"
+        expr: "COUNT(DISTINCT CASE WHEN a.status <> '已放弃' THEN a.id END)"
+        note: 排除本人已放弃的记录
+        reason: 「投了几家」问的是投出去的量，本人撤回的不该留在分母里，否则完成率被系统性低估。代价是同一批历史数据从 128 变成 114，所以必须保留 v1 才能对账。
+        approved_by: 本人
 
   - key: active
     name: 在流程中
@@ -55,11 +69,23 @@ metrics:
   - key: interviews
     name: 面试场次
     aliases: [面试场次, 面了几场, 面试次数, 几场面试]
-    expr: COUNT(DISTINCT e.id)
     unit: 场
     needs_events: true
     event_filter: "e.kind = '面试'"
-    note: 数的是事件流里的面试事件，一家单位可能面多轮，所以在这里 JOIN events。
+    version: 2
+    expr: "COUNT(DISTINCT e.app_id || '|' || e.at)"
+    note: 同一单位同一天的多条面试事件算一场。
+    history:
+      - version: 1
+        effective_from: "2026-07-01"
+        expr: "COUNT(DISTINCT e.id)"
+        note: 按事件条数计，一条事件算一场
+      - version: 2
+        effective_from: "2026-10-01"
+        expr: "COUNT(DISTINCT e.app_id || '|' || e.at)"
+        note: 同一单位同一天只算一场
+        reason: 补录时同一场面试常被拆成多条（初面和技术面在同一天），按事件条数会把场次算虚。代价是「一天跑两家」仍算两场——这是对的，因为那确实是两场。
+        approved_by: 本人
 
   - key: exams
     name: 笔试场次

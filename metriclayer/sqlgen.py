@@ -22,21 +22,34 @@ def _from_clause(layer: Layer, spec: QuerySpec) -> str:
     return base
 
 
-def _where(layer: Layer, spec: QuerySpec) -> str:
+def _where(layer: Layer, spec: QuerySpec, extra_conds=()) -> str:
     conds: list[str] = []
     if spec.time_sql:
         conds.append(spec.time_sql)
     conds += [sql for _, sql in spec.filters]
     if spec.metric.needs_events and spec.metric.event_filter:
         conds.append(spec.metric.event_filter)
+    conds += [c for c in extra_conds if c]
     if not conds:
         return ""
     return "WHERE " + "\n  AND ".join(conds)
 
 
-def build_sql(layer: Layer, spec: QuerySpec, default_limit: int = 200) -> str:
+def build_sql(
+    layer: Layer,
+    spec: QuerySpec,
+    default_limit: int = 200,
+    *,
+    metric_expr: str | None = None,
+    extra_conds=(),
+) -> str:
+    """把 QuerySpec 编译成 SQL。
+
+    `metric_expr` 用来指定某一版口径的表达式（重述时用），不传就用当前版本。
+    `extra_conds` 追加额外过滤条件，例如固定数据截止日。
+    """
     a = layer.main_alias
-    metric_sql = spec.metric.expr
+    metric_sql = spec.metric.expr if metric_expr is None else metric_expr
 
     if spec.group:
         dim = layer.dimension(spec.group)
@@ -57,11 +70,12 @@ def build_sql(layer: Layer, spec: QuerySpec, default_limit: int = 200) -> str:
             order = "ORDER BY 2 " + ("DESC" if spec.order_desc else "ASC")
 
         limit = spec.limit or default_limit
-        parts = [select, _from_clause(layer, spec), _where(layer, spec),
+        parts = [select, _from_clause(layer, spec), _where(layer, spec, extra_conds),
                  group_by, order, f"LIMIT {limit}"]
     else:
         select = f'SELECT {metric_sql} AS "{spec.metric.name}"'
-        parts = [select, _from_clause(layer, spec), _where(layer, spec), "LIMIT 1"]
+        parts = [select, _from_clause(layer, spec),
+                 _where(layer, spec, extra_conds), "LIMIT 1"]
 
     return "\n".join(p for p in parts if p)
 

@@ -4,7 +4,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field as dc_field
 
-__all__ = ["Metric", "Dimension", "Layer", "load_layer"]
+__all__ = ["MetricVersion", "Metric", "Dimension", "Layer", "load_layer"]
+
+
+@dataclass
+class MetricVersion:
+    """指标的一个口径版本。
+
+    口径一旦对外用过，`expr` 就不能原地改——历史数字是按旧口径算的，
+    原地改等于让过去的数据偷偷换了含义。新增一条版本记录，旧版本留着，
+    才能回答「按当时的口径，这个月应该是多少」。
+    """
+
+    version: int
+    expr: str
+    effective_from: str = ""     # ISO 日期；空表示不参与按日期回查
+    note: str = ""
+    reason: str = ""             # 为什么要改，以及被否掉的替代方案
+    approved_by: str = ""
+
+    def describe(self) -> str:
+        when = self.effective_from or "未标注生效日"
+        return f"v{self.version}（自 {when}）"
 
 
 @dataclass
@@ -17,6 +38,35 @@ class Metric:
     needs_events: bool = False
     event_filter: str = ""
     note: str = ""
+    version: int = 1
+    history: list[MetricVersion] = dc_field(default_factory=list)
+
+    def versions(self) -> list[MetricVersion]:
+        """全部版本，按版本号升序。没写 history 时把当前定义当作唯一版本。"""
+        if self.history:
+            return sorted(self.history, key=lambda v: v.version)
+        return [MetricVersion(version=self.version, expr=self.expr, note=self.note)]
+
+    def version_at(self, asof: str) -> MetricVersion:
+        """返回 asof（含当天）时生效的版本。
+
+        早于首个版本的生效日时退回首个版本——那时还没有别的口径可用，
+        退回比报错更接近事实。
+        """
+        picked = self.versions()[0]
+        for v in self.versions():
+            if v.effective_from and v.effective_from <= asof:
+                picked = v
+        return picked
+
+    def version_by_number(self, n: int) -> MetricVersion:
+        for v in self.versions():
+            if v.version == n:
+                return v
+        raise ValueError(
+            f"指标「{self.name}」没有 v{n}；现有 "
+            + "、".join("v%d" % v.version for v in self.versions())
+        )
 
 
 @dataclass
@@ -68,6 +118,85 @@ def _need(d: dict, k: str, where: str):
     return d[k]
 
 
+def _norm_expr(s) -> str:
+    return " ".join(str(s).split())
+
+
+def _is_iso_date(s: str) -> bool:
+    if len(s) != 10 or s[4] != "-" or s[7] != "-":
+        return False
+    import datetime as _dt
+
+    try:
+        _dt.date.fromisoformat(s)
+    except ValueError:
+        return False
+    return True
+
+
+def _parse_history(raw, where: str) -> list[MetricVersion]:
+    if not raw:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(f"{where}.history 必须是列表")
+    out: list[MetricVersion] = []
+    for j, h in enumerate(raw):
+        w = f"{where}.history[{j}]"
+        if not isinstance(h, dict):
+            raise ValueError(f"{w} 必须是映射")
+        ef = str(h.get("effective_from") or "")
+        if not ef:
+            raise ValueError(f"{w} 缺少 effective_from；没有生效日就无法按日期回查")
+        if not _is_iso_date(ef):
+            raise ValueError(f"{w}.effective_from 必须是 YYYY-MM-DD，实际 {ef!r}")
+        out.append(
+            MetricVersion(
+                version=int(_need(h, "version", w)),
+                expr=str(_need(h, "expr", w)),
+                effective_from=ef,
+                note=h.get("note", ""),
+                reason=h.get("reason", ""),
+                approved_by=h.get("approved_by", ""),
+            )
+        )
+    _validate_history(out, where)
+    return out
+
+
+def _validate_history(history: list[MetricVersion], where: str) -> None:
+    nums = sorted(v.version for v in history)
+    if len(set(nums)) != len(nums):
+        raise ValueError(f"{where}.history 版本号重复：{nums}")
+    if nums != list(range(1, len(nums) + 1)):
+        raise ValueError(f"{where}.history 版本号必须从 1 连续递增，实际 {nums}")
+    seq = [v.effective_from for v in sorted(history, key=lambda v: v.version)]
+    if seq != sorted(seq):
+        raise ValueError(
+            f"{where}.history 的 effective_from 必须随版本号递增，实际 {seq}"
+        )
+
+
+def _check_current_matches_history(metric: Metric, where: str) -> None:
+    """当前 expr 必须等于 history 最后一版。
+
+    不相等说明改了 expr 却没记版本——那样过去按旧口径算出的数字会被
+    悄悄改写，正是这个模块要防的事，所以直接拒绝加载，不放过。
+    """
+    if not metric.history:
+        return
+    last = sorted(metric.history, key=lambda v: v.version)[-1]
+    if _norm_expr(last.expr) != _norm_expr(metric.expr):
+        raise ValueError(
+            f"{where} 的 expr 与 history 最后一版 v{last.version} 不一致；"
+            "改了口径请新增一条 history，不要直接改 expr"
+        )
+    if metric.version != last.version:
+        raise ValueError(
+            f"{where} 的 version={metric.version} 与 history 最后一版 "
+            f"v{last.version} 不一致"
+        )
+
+
 def load_layer(path: str) -> Layer:
     import yaml
 
@@ -87,18 +216,20 @@ def load_layer(path: str) -> Layer:
         aliases = m.get("aliases") or []
         if isinstance(aliases, str):
             aliases = [aliases]
-        metrics.append(
-            Metric(
-                key=_need(m, "key", where),
-                name=m.get("name", m["key"]),
-                expr=_need(m, "expr", where),
-                aliases=sorted(aliases, key=len, reverse=True),
-                unit=m.get("unit", ""),
-                needs_events=bool(m.get("needs_events", False)),
-                event_filter=m.get("event_filter", ""),
-                note=m.get("note", ""),
-            )
+        metric = Metric(
+            key=_need(m, "key", where),
+            name=m.get("name", m["key"]),
+            expr=_need(m, "expr", where),
+            aliases=sorted(aliases, key=len, reverse=True),
+            unit=m.get("unit", ""),
+            needs_events=bool(m.get("needs_events", False)),
+            event_filter=m.get("event_filter", ""),
+            note=m.get("note", ""),
+            version=int(m.get("version", 1)),
+            history=_parse_history(m.get("history"), where),
         )
+        _check_current_matches_history(metric, where)
+        metrics.append(metric)
 
     dimensions: list[Dimension] = []
     for i, d in enumerate(raw.get("dimensions") or []):

@@ -9,6 +9,9 @@
 时间字段是哪个、状态枚举有哪几种。然后自然语言问答按这一层翻译成 SQL，
 **只读执行**，并把译文和口径一起打出来供审阅。
 
+而且口径是可以改的。改的时候留旧版本，改完能算出「按当时的口径应该是多少」、
+差额落在哪些维度上。没有这一步，口径一改，历史数字就断在那里，谁都对，也都对不上账。
+
 ```
 $ python nlq.py -d data/demo.db "近30天面试场次按月"
 问：近30天面试场次按月
@@ -71,7 +74,7 @@ SELECT 1  -- drop table x
 metrics:
   - key: active
     name: 在流程中
-    aliases: [在流程中, 流程中的, 还在跑, 没进行中, 进行中]
+    aliases: [在流程中, 流程中的, 还在跑, 没结束, 进行中]
     expr: "SUM(CASE WHEN a.status = '流程中' THEN 1 ELSE 0 END)"
     unit: 家
     note: 只含状态为「流程中」的，泡池子不计入——泡池子另有一档。
@@ -85,6 +88,61 @@ dimensions:
 ```
 
 `note` 会跟结果一起打出来。**数对不对先看口径**——这是这个工具唯一想改变的习惯。
+
+---
+
+## 口径改了怎么办：重述
+
+口径是要改的。改完那天起新数字是对的，旧数字也还是对的——只是两者已经不是一回事。
+
+所以 `expr` **不能原地改**。改口径要新增一条版本记录：
+
+```yaml
+  - key: applications
+    name: 投递数
+    version: 2
+    expr: "COUNT(DISTINCT CASE WHEN a.status <> '已放弃' THEN a.id END)"
+    history:
+      - version: 1
+        effective_from: "2026-07-01"
+        expr: "COUNT(DISTINCT a.id)"
+        note: 所有入库记录都算投过
+      - version: 2
+        effective_from: "2026-09-15"
+        expr: "COUNT(DISTINCT CASE WHEN a.status <> '已放弃' THEN a.id END)"
+        reason: 本人撤回的不该留在分母里，否则完成率被系统性低估。
+        approved_by: 本人
+```
+
+改了 `expr` 却没加版本，加载器会**直接拒绝**——那等于让过去按旧口径算出的数字悄悄换了含义，正是这一层要防的事。
+
+重述就是对账：
+
+```bash
+python restate.py -d data/demo.db --versions applications            # 这个指标改过几次
+python restate.py -d data/demo.db --metric applications --dimension status
+```
+
+```
+  投递数：v1 → v2，128 → 114（-14，-10.9%）
+  数据截止 2026-10-15：两版跑在同一批数据上，差额只来自口径，不含这期间新补录的记录
+
+  状态     v1   v2  差额   变化率
+  ──────  ───  ───  ────  ───────
+  已放弃   14    0   -14  -100.0%
+  已挂     26   26     0    +0.0%
+  泡池子   34   34     0    +0.0%
+  流程中   54   54     0    +0.0%
+  合计    128  114   -14   -10.9%
+```
+
+差额**只落在「已放弃」这一组**，其他三组一动不动。口径变更的影响是结构性的，不是所有数字按比例缩一下——用比例估算会错得很难看。
+
+两个设计约束：
+
+**必须固定数据截止日。** 两套口径要跑在同一批数据上，否则差额里混着"这期间新补录了几条"，那是数据修订不是口径变更，混在一起就无法各自归因。默认截止日取库里最晚日期，不用"今天"——库里的数据和今天没有关系。
+
+**分组之和必须等于总计。** 这是测试里的一条不变量。不等就说明两次查询看的不是同一批数据，或者对齐时漏了只在某一版出现的键。
 
 ---
 
@@ -111,10 +169,12 @@ PyYAML 按 YAML 1.1 把裸 `on` 解析成布尔 `True`，读出来 `ev.get("on")
 ```bash
 pip install -r requirements.txt
 python data/build_demo.py                  # 生成 128 条虚构投递记录
-python tests/test_core.py                  # 34 项单元测试
+python tests/test_core.py                  # 52 项单元测试
 python nlq.py -d data/demo.db --list-metrics
 python nlq.py -d data/demo.db "本月各城市投递数"
 python nlq.py -d data/demo.db --sql "投递最多的前3个城市"
+python restate.py -d data/demo.db --versions applications
+python restate.py -d data/demo.db --metric applications --dimension status
 ```
 
 常用参数：
@@ -141,24 +201,29 @@ python nlq.py -d data/demo.db --sql "投递最多的前3个城市"
    或由 `default_true` 维度接管。
 4. **模型兜底不可靠**。3B 级模型在 CPU 上生成 SQL 的准确率不足以承担正确性，
    它只是给复杂句一个兜底选项，不能替代口径层。
+5. **重述只回答口径变更的差额，不回答数据修订的差额**。补录、订正、删除记录
+   造成的变化是另一回事，需要用两个不同的 `--cutoff` 各跑一次来对比。
+   把它和口径差额混在一起，两个都解释不清。
 
 ---
 
 ## 目录
 
 ```
-nlq.py                   CLI 入口
+nlq.py                   CLI 入口：自然语言取数
+restate.py               CLI 入口：口径重述与对账
 metriclayer/
-  metrics.py             口径层加载（指标/维度/枚举/关联）
+  metrics.py             口径层加载（指标/维度/枚举/关联/版本历史）
   parse.py               自然语言 → QuerySpec（词典 + 时间解析）
   sqlgen.py              QuerySpec → SQL；也给模型拼提示词
+  restate.py             两版口径对比（固定数据截止日，按维度拆差额）
   guard.py               三层只读守卫
   schema.py              库结构描述
   render.py              终端表格（中文按显示宽度对齐）
   llm.py                 可选 Ollama 后端
-metrics/ledger.example.yaml   示例口径层（6 指标 / 5 维度）
+metrics/ledger.example.yaml   示例口径层（6 指标 / 5 维度 / 2 个指标带版本历史）
 data/build_demo.py            虚构演示库生成器
-tests/test_core.py            34 项单元测试
+tests/test_core.py            52 项单元测试
 ```
 
 ## 许可证

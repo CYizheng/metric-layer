@@ -167,11 +167,102 @@ def test_readonly_db() -> None:
         con.close()
 
 
+def test_versions() -> None:
+    print("口径版本")
+    m = LAYER.metric("applications")
+    check("历史两版", len(m.versions()) == 2, str(len(m.versions())))
+    check("版本号连续", [v.version for v in m.versions()] == [1, 2])
+    check("按日期取 v1", m.version_at("2026-08-01").version == 1)
+    # 生效当日就按新口径算，不是次日
+    check("生效当日取新版", m.version_at("2026-09-15").version == 2)
+    check("早于首版退回首版", m.version_at("2026-01-01").version == 1)
+    try:
+        m.version_by_number(9)
+        check("不存在的版本号报错", False)
+    except ValueError:
+        check("不存在的版本号报错", True)
+
+    a = LAYER.metric("active")
+    check("无 history 时当前定义即唯一版本",
+          len(a.versions()) == 1 and a.versions()[0].expr == a.expr)
+
+    # 改了 expr 却不加版本，等于让历史数字悄悄换含义，必须拒绝加载
+    import tempfile
+    import yaml
+
+    with open(os.path.join(ROOT, "metrics", "ledger.example.yaml"), encoding="utf-8") as f:
+        raw = yaml.safe_load(f)
+    raw["metrics"][0]["expr"] = "COUNT(*)"
+    with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False,
+                                     encoding="utf-8") as tmp:
+        yaml.safe_dump(raw, tmp, allow_unicode=True)
+        bad_path = tmp.name
+    try:
+        load_layer(bad_path)
+        check("改 expr 不加版本被拒", False)
+    except ValueError as e:
+        check("改 expr 不加版本被拒", "history" in str(e), str(e))
+    finally:
+        os.unlink(bad_path)
+
+
+def test_restate() -> None:
+    print("口径重述")
+    db = os.path.join(ROOT, "data", "demo.db")
+    if not os.path.exists(db):
+        print("  (跳过：未生成 data/demo.db)")
+        return
+
+    from metriclayer.restate import data_cutoff_of, restate
+
+    con = guard.open_readonly(db)
+    try:
+        cutoff = data_cutoff_of(con, LAYER)
+        check("取到数据截止日", bool(cutoff), str(cutoff))
+
+        rep = restate(con, LAYER, "applications")
+        check("投递数 128→114",
+              (rep.total.before, rep.total.after) == (128.0, 114.0),
+              f"{rep.total.before}→{rep.total.after}")
+        check("投递数差额 -14", rep.total.delta == -14, str(rep.total.delta))
+
+        rep = restate(con, LAYER, "interviews")
+        check("面试场次 60→39",
+              (rep.total.before, rep.total.after) == (60.0, 39.0),
+              f"{rep.total.before}→{rep.total.after}")
+
+        # 分组之和必须等于总计。不等说明两次查询看的不是同一批数据，
+        # 或者对齐时漏了只在某一版出现的键。
+        rep = restate(con, LAYER, "applications", dimension="status")
+        check("分组之和等于总计",
+              sum(r.before for r in rep.rows) == rep.total.before,
+              f"{sum(r.before for r in rep.rows)} vs {rep.total.before}")
+        check("差额只落在已放弃",
+              all(r.delta == 0 for r in rep.rows if r.key != "已放弃"))
+
+        rep = restate(con, LAYER, "applications",
+                      before="2026-08-01", after="2026-10-01")
+        check("按日期取两版", (rep.before.version, rep.after.version) == (1, 2))
+
+        rep = restate(con, LAYER, "active")
+        check("单版本指标无差额", not rep.moved)
+
+        try:
+            restate(con, LAYER, "not_a_metric")
+            check("未知指标报错", False)
+        except ValueError:
+            check("未知指标报错", True)
+    finally:
+        con.close()
+
+
 def main() -> int:
     test_time()
     test_parse()
     test_sqlgen()
     test_guard()
+    test_versions()
+    test_restate()
     test_readonly_db()
     print(f"\n共 {PASS + FAIL} 项：通过 {PASS}，失败 {FAIL}")
     return 0 if FAIL == 0 else 1
