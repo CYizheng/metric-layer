@@ -1,0 +1,114 @@
+# 指标口径层：把「投递数」「在流程中」这些词的定义写下来
+#
+# 为什么要这一层：自然语言取数最容易出的错不是 SQL 写错，而是**同一个词
+# 在不同人嘴里指不同东西**。「投递数」是投过就算，还是去掉已放弃的？
+# 「在流程中」包不包含泡池子？不写下来，每次问出来的数都不一样。
+#
+# 声明式的好处是：口径可以被审阅、被 diff、被下一个人接手。
+
+version: 1
+name: 求职投递台账（示例口径）
+
+# 主表与关联
+tables:
+  main: applications
+  main_alias: a
+  events:
+    table: events
+    alias: e
+    # 键名必须是 join_on 而不是 on —— YAML 1.1 会把裸 on/off/yes/no 解析成布尔值，
+    # 写成 on 的话读出来是 True，拼进 SQL 就变成 "LEFT JOIN ... ON None"。
+    join_on: e.app_id = a.id
+
+# 时间字段：所有时间条件都作用在它上面
+time:
+  field: a.applied_at
+  format: "%Y-%m-%d"
+
+metrics:
+  - key: applications
+    name: 投递数
+    aliases: [投递数, 投递量, 投了多少, 投了几家, 一共投, 总共投, 投递, 投了, 数量, 几家]
+    expr: COUNT(DISTINCT a.id)
+    unit: 家
+    note: 只数投出去的记录，不区分当前状态。
+
+  - key: active
+    name: 在流程中
+    aliases: [在流程中, 流程中的, 还在跑, 没结束, 进行中]
+    expr: "SUM(CASE WHEN a.status = '流程中' THEN 1 ELSE 0 END)"
+    unit: 家
+    note: 只含状态为「流程中」的，泡池子不计入——泡池子另有一档。
+
+  - key: stalled
+    name: 泡池子
+    aliases: [泡池子, 卡住, 没回音, 停在]
+    expr: "SUM(CASE WHEN a.status = '泡池子' THEN 1 ELSE 0 END)"
+    unit: 家
+
+  - key: rejected
+    name: 已挂
+    aliases: [已挂, 挂了, 被拒, 拒了]
+    expr: "SUM(CASE WHEN a.status = '已挂' THEN 1 ELSE 0 END)"
+    unit: 家
+
+  - key: interviews
+    name: 面试场次
+    aliases: [面试场次, 面了几场, 面试次数, 几场面试]
+    expr: COUNT(DISTINCT e.id)
+    unit: 场
+    needs_events: true
+    event_filter: "e.kind = '面试'"
+    note: 数的是事件流里的面试事件，一家单位可能面多轮，所以在这里 JOIN events。
+
+  - key: exams
+    name: 笔试场次
+    aliases: [笔试场次, 笔试次数, 几场笔试]
+    expr: COUNT(DISTINCT e.id)
+    unit: 场
+    needs_events: true
+    event_filter: "e.kind = '笔试'"
+
+dimensions:
+  - key: city
+    name: 城市
+    column: a.city
+    aliases: [城市, 地区, 按城市, 各城市]
+  - key: category
+    name: 岗位类型
+    column: a.category
+    aliases: [岗位类型, 按岗位, 各类岗位, 方向]
+  - key: status
+    name: 状态
+    column: a.status
+    aliases: [状态, 按状态]
+  - key: channel
+    name: 渠道
+    column: a.channel
+    aliases: [渠道, 来源, 按渠道]
+  - key: month
+    name: 月份
+    column: "substr(a.applied_at, 1, 7)"
+    aliases: [月份, 按月, 每月, 各月]
+    default_true: true   # 「按趋势看」这类问法不点明也要按月
+    time_grain: true     # 时间维度按自身升序排，不按指标大小排
+
+# 状态枚举：出现在问句里就自动变成过滤条件
+enums:
+  status:
+    column: a.status
+    values: [流程中, 泡池子, 已挂, 已放弃]
+
+# 字段中文名，只用于给模型看的 schema 描述与报告表头
+labels:
+  a.id: 记录号
+  a.company: 单位
+  a.position: 岗位
+  a.category: 岗位类型
+  a.city: 城市
+  a.channel: 渠道
+  a.status: 状态
+  a.applied_at: 投递日期
+  a.next_action_at: 下次动作日期
+  e.kind: 事件类型
+  e.at: 事件日期

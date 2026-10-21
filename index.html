@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>指标口径层 · metric-layer</title>
+<style>
+  :root{
+    --bg:#fbfbfa; --fg:#1f2328; --mut:#6b7280; --line:#e5e7eb;
+    --hi:#b42318; --ok:#067647; --lo:#175cd3; --ink:#111827;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;padding:56px 24px 72px;background:var(--bg);color:var(--fg);
+    font:15px/1.7 -apple-system,"Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:840px;margin:0 auto}
+  .tag{
+    display:inline-block;font-size:12px;letter-spacing:.06em;color:var(--mut);
+    border:1px solid var(--line);border-radius:999px;padding:3px 10px;background:#fff;
+  }
+  h1{font-size:31px;line-height:1.25;margin:18px 0 10px;letter-spacing:-.01em}
+  .sub{color:var(--mut);font-size:16px;margin:0 0 34px}
+  h2{font-size:16px;margin:44px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  p{margin:0 0 14px}
+  code{background:#f3f4f6;padding:1.5px 6px;border-radius:5px;
+       font:13px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}
+  pre{
+    background:#fff;border:1px solid var(--line);border-radius:10px;
+    padding:16px 18px;overflow:auto;margin:0 0 8px;
+    font:12.5px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--ink);
+  }
+  pre .g{color:var(--mut)}
+  pre .k{color:#8250df}
+  pre .n{color:#0550ae}
+  .cap{color:var(--mut);font-size:12.5px;margin:0 0 22px}
+  .flow{
+    background:#fff;border:1px solid var(--line);border-radius:10px;
+    padding:20px 22px;margin:0 0 10px;
+    font:13px/2 ui-monospace,SFMono-Regular,Consolas,monospace;
+  }
+  .flow b{font-weight:600;color:var(--lo)}
+  table{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(--line);
+        border-radius:10px;overflow:hidden;font-size:14px}
+  th,td{padding:11px 13px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#f6f7f9;font-size:12px;color:var(--mut);font-weight:600}
+  tr:last-child td,tr:last-child th{border-bottom:none}
+  .acts{display:flex;gap:12px;flex-wrap:wrap;margin:36px 0 0}
+  .btn{display:inline-block;padding:10px 20px;border-radius:9px;text-decoration:none;
+       font-size:14px;font-weight:500;border:1px solid var(--line);background:#fff;color:var(--fg);
+       transition:background .15s}
+  .btn:hover{background:#f6f7f9}
+  .btn.primary{background:#1f2328;color:#fff;border-color:#1f2328}
+  .btn.primary:hover{background:#000}
+  footer{margin-top:56px;padding-top:18px;border-top:1px solid var(--line);
+         color:var(--mut);font-size:13px}
+  a{color:var(--lo)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <span class="tag">CLI · 只读 · 规则优先 · 模型可选</span>
+  <h1>指标口径层</h1>
+  <p class="sub">
+    自然语言取数最容易出的错不是 SQL 写错，而是同一个词在不同人嘴里指不同东西。
+    「投递数」是投过就算，还是去掉已放弃的？「在流程中」包不包括泡池子？
+    不把口径写下来，每次问出来的数都不一样，而且没人能证明哪个对。
+  </p>
+
+  <h2>一句问句怎么变成 SQL</h2>
+  <div class="flow">
+    自然语言<br>
+    &nbsp;&nbsp;↓&nbsp; <b>① 口径层命中</b>（词典，确定性）<br>
+    指标 · 维度 · 状态过滤 · 时间范围 · 排序限额<br>
+    &nbsp;&nbsp;↓&nbsp; <b>② 只从声明里拼装片段</b>（不拼接任何用户原文）<br>
+    SQL<br>
+    &nbsp;&nbsp;↓&nbsp; <b>③ 三层只读守卫</b><br>
+    结果 + 译文 + 口径说明
+  </div>
+  <p class="cap">词表是封闭的，所以命中结果可预测、可测试、可以被 review。</p>
+
+  <h2>实际跑出来是什么样</h2>
+
+<pre><span class="g">$ python nlq.py -d data/demo.db --sql "本月各城市投递数"</span>
+问：本月各城市投递数
+  解析：指标=投递数 · 分组=city · 时间=2026 年 10 月
+  口径：只数投出去的记录，不区分当前状态。
+
+  <span class="k">SELECT</span> a.city <span class="k">AS</span> "城市",
+         <span class="n">COUNT</span>(<span class="k">DISTINCT</span> a.id) <span class="k">AS</span> "投递数"
+  <span class="k">FROM</span> applications a
+  <span class="k">WHERE</span> a.applied_at <span class="k">&gt;=</span> '2026-10-01' <span class="k">AND</span> a.applied_at <span class="k">&lt;</span> '2026-11-01'
+  <span class="k">GROUP BY</span> a.city
+  <span class="k">ORDER BY</span> 2 <span class="k">DESC</span>
+  <span class="k">LIMIT</span> 200
+
+  城市  投递数
+  ────  ──────
+  海口       5
+  上海       4
+  武汉       3
+  深圳       3
+  贵阳       3
+  北京       2
+  成都       2
+  杭州       2
+  广州       1
+  西安       1
+
+  <span class="g">10 行 · 0.7 ms</span></pre>
+
+<pre><span class="g">$ python nlq.py -d data/demo.db --sql "各岗位类型的面试场次前3"</span>
+问：各岗位类型的面试场次前3
+  解析：指标=面试场次 · 分组=category · 排序=降序 · 前 3
+  口径：数的是事件流里的面试事件，一家单位可能面多轮，所以在这里 JOIN events。
+
+  <span class="k">SELECT</span> a.category <span class="k">AS</span> "岗位类型",
+         <span class="n">COUNT</span>(<span class="k">DISTINCT</span> e.id) <span class="k">AS</span> "面试场次"
+  <span class="k">FROM</span> applications a
+  <span class="k">LEFT JOIN</span> events e <span class="k">ON</span> e.app_id = a.id
+  <span class="k">WHERE</span> e.kind = '面试'
+  <span class="k">GROUP BY</span> a.category
+  <span class="k">ORDER BY</span> 2 <span class="k">DESC</span>
+  <span class="k">LIMIT</span> 3
+
+  岗位类型  面试场次
+  ────────  ────────
+  产品运营        18
+  数据治理        12
+  数据分析        11
+
+  <span class="g">3 行 · 0.5 ms</span></pre>
+  <p class="cap">
+    第二个问句跨到了事件表——「面试场次」数的是事件流里的面试事件，
+    一家单位可能面多轮。这类跨表指标必须在口径层里显式声明，工具不会自己猜。
+  </p>
+
+  <h2>只读是三层，不是一句 <code>if</code></h2>
+  <table>
+    <thead><tr><th>层</th><th>手段</th><th>兜住什么</th></tr></thead>
+    <tbody>
+      <tr><td>连接层</td>
+          <td><code>file:...?mode=ro</code> + <code>PRAGMA query_only=ON</code></td>
+          <td>即使判断逻辑被绕过，也写不进去</td></tr>
+      <tr><td>语句层</td>
+          <td>必须单条 <code>SELECT</code>／<code>WITH</code>；禁用 INSERT / UPDATE / DELETE / DROP / ALTER / ATTACH / PRAGMA / VACUUM</td>
+          <td>注入与误操作</td></tr>
+      <tr><td>结果层</td>
+          <td>没有 <code>LIMIT</code> 就自动补；<code>fetchmany(max+1)</code> 判断截断</td>
+          <td>一条误写把内存打爆</td></tr>
+    </tbody>
+  </table>
+  <p class="cap" style="margin-top:14px">
+    判断前先剥掉注释与字符串字面量，否则字段值里出现 <code>drop</code> 就会被误杀。
+  </p>
+
+  <h2>为什么不让模型当主力</h2>
+  <p>
+    模型（可选 Ollama）只处理规则层覆盖不到的复杂句，每一条输出都必须过守卫、
+    真跑一次，失败就报错回退。<b>把「能不能查对」押在 CPU 上的 3B 模型上，
+    是这个工具最不该做的设计</b>——它生成得快，但你没法证明它对。
+  </p>
+
+  <div class="acts">
+    <a class="btn primary" href="https://github.com/CYizheng/metric-layer">源码与说明 →</a>
+    <a class="btn" href="https://github.com/CYizheng/consistency-audit">配套：材料一致性核查</a>
+  </div>
+
+  <footer>
+    MIT License · <code>data/demo.db</code> 与口径层内数据均为虚构，由 <code>data/build_demo.py</code> 生成
+  </footer>
+
+</div>
+</body>
+</html>
