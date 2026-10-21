@@ -78,7 +78,7 @@ def _parse_time(q: str, layer: Layer, today: dt.date) -> tuple[str, str]:
     """返回 (SQL 片段, 人读标签)；无时间词时返回空串与「全部时间」。"""
     col = layer.time_field
 
-    if m := re.search(r"近\s*(\d+|[一二两三四五六七八九十])\s*天", q):
+    if m := re.search(r"(?:近|前|过去)\s*(\d+|[一二两三四五六七八九十])\s*天", q):
         n = _cn_int(m.group(1)) or 7
         start = today - dt.timedelta(days=n)
         return f"{col} >= '{start.isoformat()}'", f"近 {n} 天"

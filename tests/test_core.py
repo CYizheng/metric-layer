@@ -65,6 +65,10 @@ def test_parse() -> None:
     s = parse("近30天投递数", LAYER, TODAY)
     check("「前30天」不被当成限额 30", s.limit is None, s.limit)
 
+    s = parse("前30天的投递数", LAYER, TODAY)
+    check("「前N天」按时间解释，不是限额",
+          s.limit is None and s.time_label == "近 30 天", f"{s.limit},{s.time_label}")
+
     s = parse("在流程中的有多少家", LAYER, TODAY)
     check("状态值自动成为过滤条件", any("流程中" in f[1] for f in s.filters), s.filters)
 
